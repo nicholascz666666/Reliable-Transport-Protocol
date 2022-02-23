@@ -1,0 +1,134 @@
+#!/usr/bin/python3
+
+# CS3700, Fall 2021
+# TCP Project Starter Code
+
+import datetime
+import json
+import logging
+import sys
+import socket
+import time
+
+from base64 import b64encode
+from socket import timeout
+
+MSG_SIZE = 1500
+DATA_SIZE = 1000
+TIMEOUT = 30
+SEQUENCE = 0
+TOLERANCE = 0.75
+DEBUG = False
+packet_not_acked = {}
+NO_MORE_DATA = False
+
+log = "send.log"
+logging.basicConfig(filename=log, level=logging.DEBUG, format='%(asctime)s %(message)s', datefmt='%d/%m/%Y %H:%M:%S')
+logging.info('Log Entry Here.')
+
+# Bind to localhost and an ephemeral port
+IP_PORT = sys.argv[1]
+UDP_IP = IP_PORT[0:IP_PORT.find(":")]
+UDP_PORT = int(IP_PORT[IP_PORT.find(":") + 1:])
+dest = (UDP_IP, UDP_PORT)
+
+# how many packets to send before ACK
+LOOP = 1
+
+time.sleep(.5)
+
+# Set up the socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(TIMEOUT)
+
+
+def log(string):
+    sys.stderr.write(datetime.datetime.now().strftime("%H:%M:%S.%f") + " 3700send: " + string + "\n")
+    if DEBUG:
+        logging.info(datetime.datetime.now().strftime("%H:%M:%S.%f") + " 3700send: " + string + "\n")
+
+
+def send_next_packet():
+    global SEQUENCE
+    data_from_stdin = sys.stdin.buffer.read(DATA_SIZE)
+    if len(data_from_stdin) > 0:
+        msg = json.dumps({"sequence": SEQUENCE,
+                          "data": b64encode(data_from_stdin).decode(),
+                          "ack": False,
+                          "eof": False})
+        if sock.sendto(msg.encode(), dest) < len(msg):
+            log("[error] unable to fully send packet")
+        else:
+            log("[send data] " + str(SEQUENCE) + " (" + str(len(data_from_stdin)) + ")")
+        SEQUENCE += len(data_from_stdin)
+        packet_not_acked[SEQUENCE] = msg.encode()
+        return True
+    else:
+        log("No more data to send")
+        return False
+
+
+# Send first packet
+send_next_packet()
+
+
+def send_not_acked():
+    for value in packet_not_acked.values():
+        sock.sendto(value, dest)
+
+
+# Now read in data, send packets
+while True:
+    log("ABOUT TO SLEEP")
+    sock.settimeout(TOLERANCE)
+    result = None
+    try:
+        result = sock.recvfrom(MSG_SIZE)
+        if TOLERANCE == 0.75:
+            TOLERANCE = TOLERANCE - 0.25
+    except timeout:
+        log("[timed out on sender, re-adjusting the tolerance]")
+        send_not_acked()
+        log(str(packet_not_acked.keys()))
+        TOLERANCE = 0.75
+        LOOP = 1
+        continue
+
+    if result:
+        (data, addr) = result
+        try:
+            decoded = json.loads(data.decode())
+            log("[recv pkt] " + str(decoded))
+            log("[recv ack] " + str(decoded['ack']))
+
+            # If there is an ack, send next packet
+            if decoded['ack']:
+                packet_not_acked.pop(decoded['ack'], None)
+                # Try to send next packet; break if no more data
+                inner_loop_count = 0
+                # TODO: cleanup
+                # send packets for as long as the current loop or run out of packets
+                while inner_loop_count < (2 ** LOOP):
+                    if not send_next_packet() and len(packet_not_acked) == 0:
+                        log("Ended")
+                        break
+                    inner_loop_count = inner_loop_count + 1
+                # if successful, loop increments
+                if LOOP < 3:
+                    LOOP = LOOP + 1
+                else:
+                    LOOP = 1
+
+                if len(packet_not_acked) == 0:
+                    break
+
+        except (ValueError, KeyError, TypeError):
+            log("[recv corrupt packet]")
+            log("Received data: " + str(result))
+    else:
+        log("[error] timeout")
+        sys.exit(-1)
+
+for i in range(200):
+    sock.sendto(json.dumps({"eof": True, "data": "", "sequence": SEQUENCE, "ack": False}).encode(), dest)
+sys.exit(0)
